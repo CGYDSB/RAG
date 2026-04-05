@@ -73,8 +73,12 @@ class ChromaVectorStore(BaseVectorStore):
     def __init__(self, collection_name: str = "documents",
                  persist_directory: str = "./data/chroma_db"):
         import chromadb
+        from chromadb.config import Settings
 
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        self.client = chromadb.PersistentClient(
+            path=persist_directory,
+            settings=Settings(anonymized_telemetry=False)
+        )
         self.collection = self.client.get_or_create_collection(name=collection_name)
         logger.info(f"ChromaVectorStore ready: {collection_name} @ {persist_directory}")
 

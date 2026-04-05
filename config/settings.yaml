@@ -62,7 +62,7 @@ vector_store:
 # 5. 文档处理配置
 document:
   supported_formats: [".pdf", ".txt", ".md", ".docx", ".html"]
-  max_file_size: 50
+  max_file_size: 100
   default_chunk_size: 256      # 调小，让每个chunk更聚焦
   default_chunk_overlap: 30
 

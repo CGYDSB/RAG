@@ -1,0 +1,79 @@
+这个 Dockerfile 用于将 RAG 系统打包成可部署的容器镜像，
+它基于 Python 3.11-slim 构建运行环境，并安装必要的系统依赖与 Python 依赖，
+通过分层缓存优化构建效率，同时创建数据与日志目录、暴露 FastAPI 服务端口，并配置健康检查机制以监控服务状态。
+最终容器启动时自动执行 main.py server，将整个 RAG 系统以标准化、可移植的方式部署为生产级服务。
+# =========================
+# RAG System Docker 镜像构建文件
+# =========================
+
+# 使用轻量级 Python 3.11 镜像作为基础环境
+FROM python:3.11-slim
+
+# =========================
+# 1. 设置容器工作目录
+# =========================
+WORKDIR /app
+
+
+# =========================
+# 2. 安装系统级依赖
+# =========================
+# 为什么需要 gcc / g++：
+# - Python 某些库（如 numpy / faiss / sentencepiece）需要编译
+# - curl 用于 health check
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# =========================
+# 3. 复制依赖文件（利用 Docker layer cache）
+# =========================
+# 先复制 requirements.txt：
+# → 只有依赖变化时才重新安装 pip 包
+COPY requirements.txt .
+
+# 安装 Python 依赖（无缓存模式，减少镜像体积）
+RUN pip install --no-cache-dir -r requirements.txt
+
+
+# =========================
+# 4. 复制项目代码
+# =========================
+COPY . .
+
+
+# =========================
+# 5. 创建运行所需目录
+# =========================
+# 用于存储：
+# - 原始数据
+# - 处理后数据
+# - 日志
+RUN mkdir -p data/raw data/processed logs
+
+
+# =========================
+# 6. 暴露服务端口
+# =========================
+# FastAPI 默认端口 8000
+EXPOSE 8000
+
+
+# =========================
+# 7. 健康检查机制（容器自检）
+# =========================
+# Docker 会定期访问 /health
+# 如果失败 → 容器标记 unhealthy
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+
+# =========================
+# 8. 启动命令（容器启动后执行）
+# =========================
+# 等价于：
+# python main.py server --host 0.0.0.0 --port 8000
+CMD ["python", "main.py", "server", "--host", "0.0.0.0", "--port", "8000"]

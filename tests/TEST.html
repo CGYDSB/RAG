@@ -1,0 +1,152 @@
+"""
+这个脚本用于构建RAG系统的示例知识库与评估数据集，
+其中Markdown文档 intro_to_rag.md 作为向量检索的测试知识源，
+包含RAG原理、流程、优势与应用场景；同时生成 eval_cases.json 作为标准问答评估集，
+用于衡量系统在真实问答中的检索与生成质量，从而支撑RAG系统的端到端测试与效果验证。
+====================================================
+📌 示例数据构建脚本（RAG测试数据）
+====================================================
+
+该脚本用于生成：
+1️⃣ 示例知识库文档（Markdown）
+2️⃣ RAG评估测试集（JSON）
+
+用途：
+- 用于向量数据库测试
+- 用于RAG检索效果评估
+- 用于系统端到端验证
+"""
+
+# =========================
+# 📌 基础库
+# =========================
+import os
+import json
+
+# =========================
+# 📌 1. 创建数据目录
+# =========================
+# 如果目录不存在，则自动创建
+os.makedirs("rag_project/data/raw", exist_ok=True)
+
+# ====================================================
+# 📌 2. 构造示例知识文档（RAG知识库）
+# ====================================================
+sample_doc = """# Introduction to Retrieval-Augmented Generation (RAG)
+
+## What is RAG?
+
+Retrieval-Augmented Generation (RAG) is a technique that combines the power of large language models (LLMs) with information retrieval systems. It was introduced by Meta AI researchers in 2020.
+
+## How RAG Works
+
+RAG works in two main phases:
+
+1. **Retrieval Phase**
+   # 用户提问后，从知识库检索相关内容
+
+2. **Generation Phase**
+   # 将检索内容 + 用户问题一起输入LLM生成答案
+
+## Benefits of RAG
+
+- Reduced Hallucinations
+- Up-to-date Information
+- Source Attribution
+- Domain Adaptation
+
+## Architecture Components
+
+### Document Processing
+- 文档加载
+- 文本切分
+- 元数据处理
+
+### Embedding and Indexing
+- 文本向量化
+- 向量数据库存储
+
+### Retrieval
+- 语义检索
+- 混合检索（BM25 + vector）
+- rerank排序优化
+
+### Generation
+- Prompt增强
+- LLM生成
+- 引用输出
+
+## Use Cases
+
+- 企业知识库
+- 客服机器人
+- 医疗/法律问答系统
+
+## Challenges
+
+- Chunking策略
+- 检索准确率
+- 延迟优化
+- 评估困难
+
+## Future Directions
+
+- 多模态RAG
+- Agent增强RAG
+- 自学习RAG
+"""
+
+# =========================
+# 📌 保存知识文档
+# =========================
+doc_path = "rag_project/data/raw/intro_to_rag.md"
+
+with open(doc_path, "w", encoding="utf-8") as f:
+    f.write(sample_doc)
+
+print(f"✅ 示例知识文档已创建: {doc_path}")
+
+# ====================================================
+# 📌 3. 构造评估测试集（RAG Eval Dataset）
+# ====================================================
+eval_cases = [
+    {
+        # ❓ 测试问题1
+        "question": "What is RAG?",
+
+        # 📌 标准答案（用于评估）
+        "ground_truth": (
+            "RAG (Retrieval-Augmented Generation) is a technique that combines "
+            "large language models with information retrieval systems to generate "
+            "contextualized answers based on retrieved documents."
+        )
+    },
+    {
+        "question": "What are the main benefits of RAG?",
+        "ground_truth": (
+            "The main benefits include reduced hallucinations, up-to-date information, "
+            "source attribution, and easy domain adaptation."
+        )
+    },
+    {
+        "question": "What are the two main phases of RAG?",
+        "ground_truth": (
+            "The two main phases are the Retrieval Phase and the Generation Phase."
+        )
+    }
+]
+
+# =========================
+# 📌 保存评估数据
+# =========================
+eval_path = "rag_project/tests/eval_cases.json"
+
+with open(eval_path, "w", encoding="utf-8") as f:
+    json.dump(eval_cases, f, indent=2, ensure_ascii=False)
+
+print(f"✅ 评估测试集已创建: {eval_path}")
+
+# =========================
+# 📌 完成提示
+# =========================
+print("🎉 示例数据构建完成！")

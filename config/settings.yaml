@@ -79,6 +79,7 @@ document:
 retrieval:
   top_k: 5
   similarity_threshold: 0.5    # 适当降低阈值，本地测试文档少时更容易召回
+  off_topic_threshold: 0.3     # 最高分低于此值时判定为无关问题，直接拒答
 
   hybrid_search:
     enabled: true

@@ -465,6 +465,16 @@ class RAGPipeline:
         # -------- 2. 相似度阈值过滤（去除噪声chunk）--------
         threshold = self.config.get('retrieval', {}).get('similarity_threshold', 0.3)
         filtered_chunks = [c for c in retrieved_chunks if c.final_score >= threshold]
+
+        # 如果所有 chunk 分数都很低，说明问题与文档完全无关，直接返回
+        off_topic_threshold = self.config.get('retrieval', {}).get('off_topic_threshold', 0.3)
+        if not filtered_chunks or (retrieved_chunks and retrieved_chunks[0].final_score < off_topic_threshold):
+            return RAGResponse(
+                answer="抱歉，您的问题超出了我的知识范围，我只能回答与文档相关的技术问题。",
+                sources=[],
+                metadata={'retrieved_count': 0, 'reason': 'off_topic'}
+            )
+
         if not filtered_chunks:
             filtered_chunks = retrieved_chunks[:3]  # 至少保留top3
 

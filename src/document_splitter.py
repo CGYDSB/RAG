@@ -1,24 +1,11 @@
-"""
-Document Splitting and Chunking Strategies
-
-支持策略：
-1. 递归切分 RecursiveCharacterSplitter（推荐默认）
-2. 语义切分 SemanticSplitter
-3. 固定长度切分 FixedSizeSplitter
-"""
-
 import re
 from typing import List, Optional, Callable, Dict
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
-
 from loguru import logger
 from .data_loader import Document
 
 
-# =========================================
-# 1. 文本块结构
-# =========================================
 @dataclass
 class TextChunk:
     content: str
@@ -32,16 +19,9 @@ class TextChunk:
         return f"TextChunk(id={self.chunk_id}, chars={len(self.content)}, preview='{preview}')"
 
     def to_dict(self) -> Dict:
-        return {
-            "id": self.chunk_id,
-            "text": self.content,
-            "metadata": self.metadata,
-        }
+        return {"id": self.chunk_id, "text": self.content, "metadata": self.metadata}
 
 
-# =========================================
-# 2. 抽象基类
-# =========================================
 class BaseSplitter(ABC):
 
     @abstractmethod
@@ -55,25 +35,25 @@ class BaseSplitter(ABC):
         return all_chunks
 
 
-# =========================================
-# 3. 递归切分（推荐）
-# =========================================
 class RecursiveCharacterSplitter(BaseSplitter):
+    """
+    递归字符切分器（推荐默认）
 
-    def __init__(
-        self,
-        chunk_size: int = 512,
-        chunk_overlap: int = 50,
-        separators: Optional[List[str]] = None,
-        keep_separator: bool = True,
-        length_function: Callable[[str], int] = len
-    ):
+    改进：
+    - 策略一：从 _page_to_section 注入 section_path
+    - 策略二：_merge_small_chunks 合并碎片块
+    - 策略三：chunk_overlap 滑动窗口（已有）
+    """
+
+    def __init__(self, chunk_size=512, chunk_overlap=50, min_chunk_size=50,
+                 separators=None, keep_separator=True, length_function=len):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.min_chunk_size = min_chunk_size
         self.keep_separator = keep_separator
         self.length_function = length_function
         self.separators = separators or ["\n\n", "\n", ". ", " ", ""]
-        logger.info(f"RecursiveCharacterSplitter init (chunk_size={chunk_size}, overlap={chunk_overlap})")
+        logger.info(f"RecursiveCharacterSplitter init (chunk_size={chunk_size}, overlap={chunk_overlap}, min={min_chunk_size})")
 
     def split(self, document: Document) -> List[TextChunk]:
         raw_chunks = self._recursive_split(document.content, self.separators[:])
@@ -81,27 +61,35 @@ class RecursiveCharacterSplitter(BaseSplitter):
         current_pos = 0
         current_page = 1
 
+        # 策略一：页码 → 标题路径映射（由 data_loader 写入）
+        page_to_section = document.metadata.get("_page_to_section", {})
+        # ChromaDB 只支持标量类型，过滤掉嵌套 dict
+        base_metadata = {
+            k: v for k, v in document.metadata.items()
+            if isinstance(v, (str, int, float, bool))
+        }
+
         for i, content in enumerate(raw_chunks):
             start_idx = document.content.find(content, current_pos)
             if start_idx == -1:
                 start_idx = current_pos
             end_idx = start_idx + len(content)
 
-            # 从chunk内容中提取页码标记
-            import re
             page_match = re.search(r'\[PAGE:(\d+)\]', content)
             if page_match:
                 current_page = int(page_match.group(1))
-            # 清理页码标记，不存入向量
+
             clean_content = re.sub(r'\[PAGE:\d+\]\s*', '', content).strip()
+            section_path = page_to_section.get(current_page - 1, '')
 
             metadata = {
-                **document.metadata,
+                **base_metadata,
                 "chunk_index": i,
                 "total_chunks": len(raw_chunks),
                 "chunk_size": len(clean_content),
                 "parent_doc_id": document.doc_id,
                 "page": current_page,
+                "section_path": section_path,
             }
 
             text_chunks.append(TextChunk(
@@ -113,7 +101,27 @@ class RecursiveCharacterSplitter(BaseSplitter):
             ))
             current_pos = end_idx
 
-        return text_chunks
+        # 策略二：合并碎片块
+        return self._merge_small_chunks(text_chunks)
+
+    def _merge_small_chunks(self, chunks: List[TextChunk]) -> List[TextChunk]:
+        """把长度小于 min_chunk_size 的碎片块合并到前一个块。"""
+        if not chunks:
+            return chunks
+        merged = [chunks[0]]
+        for chunk in chunks[1:]:
+            if len(chunk.content) < self.min_chunk_size and merged:
+                prev = merged[-1]
+                merged[-1] = TextChunk(
+                    content=prev.content + "\n" + chunk.content,
+                    metadata={**prev.metadata, "chunk_size": len(prev.content) + len(chunk.content) + 1},
+                    chunk_id=prev.chunk_id,
+                    start_idx=prev.start_idx,
+                    end_idx=chunk.end_idx,
+                )
+            else:
+                merged.append(chunk)
+        return merged
 
     def _recursive_split(self, text: str, separators: List[str]) -> List[str]:
         if not text:
@@ -123,7 +131,6 @@ class RecursiveCharacterSplitter(BaseSplitter):
         remaining = separators[1:] if len(separators) > 1 else []
 
         if not separator:
-            # 字符级切分
             chunks = []
             for i in range(0, len(text), self.chunk_size - self.chunk_overlap):
                 chunks.append(text[i:i + self.chunk_size])
@@ -151,7 +158,6 @@ class RecursiveCharacterSplitter(BaseSplitter):
             else:
                 chunks.append(current)
 
-        # 合并过小的块
         merged = []
         buffer = ""
         for chunk in chunks:
@@ -167,17 +173,9 @@ class RecursiveCharacterSplitter(BaseSplitter):
         return merged if merged else [text]
 
 
-# =========================================
-# 4. 语义切分
-# =========================================
 class SemanticSplitter(BaseSplitter):
 
-    def __init__(
-        self,
-        embedding_model=None,
-        max_chunk_size: int = 512,
-        similarity_threshold: float = 0.8
-    ):
+    def __init__(self, embedding_model=None, max_chunk_size=512, similarity_threshold=0.8):
         self.max_chunk_size = max_chunk_size
         self.similarity_threshold = similarity_threshold
         self.embedding_model = embedding_model
@@ -188,20 +186,16 @@ class SemanticSplitter(BaseSplitter):
         sentences = self._split_sentences(document.content)
         if not sentences:
             return []
-
         chunks = []
         current_chunk = [sentences[0]]
-
         for sentence in sentences[1:]:
             if len(" ".join(current_chunk)) + len(sentence) > self.max_chunk_size:
                 chunks.append(" ".join(current_chunk))
                 current_chunk = [sentence]
             else:
                 current_chunk.append(sentence)
-
         if current_chunk:
             chunks.append(" ".join(current_chunk))
-
         return self._create_chunks(document, chunks)
 
     def _split_sentences(self, text: str) -> List[str]:
@@ -227,12 +221,9 @@ class SemanticSplitter(BaseSplitter):
         return result
 
 
-# =========================================
-# 5. 固定长度切分
-# =========================================
 class FixedSizeSplitter(BaseSplitter):
 
-    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 50):
+    def __init__(self, chunk_size=512, chunk_overlap=50):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -241,35 +232,24 @@ class FixedSizeSplitter(BaseSplitter):
         chunks = []
         start = 0
         idx = 0
-
         while start < len(text):
             end = min(start + self.chunk_size, len(text))
             chunk_text = text[start:end].strip()
-
             if chunk_text:
                 chunks.append(TextChunk(
                     content=chunk_text,
-                    metadata={
-                        **document.metadata,
-                        "chunk_index": idx,
-                        "parent_doc_id": document.doc_id,
-                    },
+                    metadata={**document.metadata, "chunk_index": idx, "parent_doc_id": document.doc_id},
                     chunk_id=f"{document.doc_id}_chunk_{idx}",
                     start_idx=start,
                     end_idx=end,
                 ))
                 idx += 1
-
             start = end - self.chunk_overlap
             if start >= end:
                 break
-
         return chunks
 
 
-# =========================================
-# 6. 工厂
-# =========================================
 class SplitterFactory:
 
     @staticmethod

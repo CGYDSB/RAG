@@ -96,12 +96,17 @@ def index_command(args):
     流程：
     1. 读取数据源
     2. 初始化 RAGPipeline
-    3. 文档切分 + embedding + 存储
+    3. （可选）清空向量库
+    4. 文档切分 + embedding + 存储
     """
     logger.info(f"Indexing documents from: {args.source}")
 
     config = load_config()
     pipeline = RAGPipeline.from_config('config/settings.yaml')
+
+    if args.clear:
+        pipeline.vector_store.clear()
+        logger.info("Vector store cleared.")
 
     pipeline.index_documents(
         args.source,
@@ -227,22 +232,45 @@ def chat_command(args):
         turn_num = len(pipeline.conversation.history) + 1
         logger.info(f"[第{turn_num}轮] {question}")
 
-        response = pipeline.query(
-            question=question,
-            top_k=args.top_k,
-            use_history=True
-        )
+        print(f"\n助手：", end="", flush=True)
 
-        print(f"\n助手：{response.answer}")
+        if getattr(args, 'stream', False):
+            full_answer = ""
+            sources = []
+            for token in pipeline.query(question=question, top_k=args.top_k, stream=True, use_history=True):
+                if token.startswith("__SOURCES__:"):
+                    import json as _json
+                    sources = _json.loads(token[len("__SOURCES__:"):].strip())
+                else:
+                    print(token, end="", flush=True)
+                    full_answer += token
+            print()
+            pipeline.conversation.add_turn(question, full_answer)
+        else:
+            response = pipeline.query(question=question, top_k=args.top_k, use_history=True)
+            print(response.answer)
+            sources = response.sources
 
-        # 显示来源
-        if args.show_sources and response.sources:
-            print("\n  来源：", end="")
-            refs = [
-                f"[[{s['index']}] 第{s['metadata'].get('page', '?')}页]"
-                for s in response.sources[:3]
-            ]
-            print("  ".join(refs))
+            if getattr(args, 'verbose', False) and sources:
+                print("\n  [检索原文]")
+                for s in sources:
+                    filename = s['metadata'].get('filename', '未知文件')
+                    page = s['metadata'].get('page', '?')
+                    print(f"    [{s['index']}] {filename} p.{page}: {s.get('text', '')[:150]}...")
+
+        # 拒答时不显示来源（避免误导用户）
+        is_off_topic = "超出了我的知识范围" in (response.answer if not getattr(args, 'stream', False) else "")
+        if getattr(args, 'show_sources', False) and sources and not is_off_topic:
+            print("\n  来源：")
+            for s in sources:
+                filename = s['metadata'].get('filename', s['metadata'].get('source', '未知文件'))
+                page = s['metadata'].get('page', '?')
+                section = s.get('section_path', '') or s['metadata'].get('section_path', '')
+                score = s.get('score', 0)
+                location = f"第{page}页"
+                if section:
+                    location = f"{section} · 第{page}页"
+                print(f"    [[{s['index']}]] {filename} | {location} | 相关度 {score:.3f}")
 
         # 显示历史压缩提示
         if len(pipeline.conversation.history) > pipeline.conversation.keep_recent:
@@ -347,10 +375,12 @@ def main():
     # 用法：python main.py index --source data/raw/
     index_parser = subparsers.add_parser('index', help='索引文档到向量数据库')
     index_parser.add_argument('--source', '-s', required=True,
-                              help='文档路径（文件或目录）')           # 必填，指定要索引的文档来源
+                              help='文档路径（文件或目录）')
     index_parser.add_argument('--batch-size', '-b', type=int, default=100,
-                              help='每批处理的 chunk 数量，默认100')   # 控制内存占用，数值越大速度越快但内存消耗越多
-    index_parser.set_defaults(func=index_command)                      # 绑定处理函数
+                              help='每批处理的 chunk 数量，默认100')
+    index_parser.add_argument('--clear', action='store_true',
+                              help='索引前清空向量库（删除所有旧数据）')
+    index_parser.set_defaults(func=index_command)
 
     # ===== query 子命令：单次问答 =====
     # 用法：python main.py query "你的问题" [--top-k 5] [--stream] [--verbose]

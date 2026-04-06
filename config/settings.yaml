@@ -78,8 +78,8 @@ document:
 # 6. 检索模块配置
 retrieval:
   top_k: 5
-  similarity_threshold: 0.5    # 适当降低阈值，本地测试文档少时更容易召回
-  off_topic_threshold: 0.3     # 最高分低于此值时判定为无关问题，直接拒答
+  similarity_threshold: 0.3     # 混合检索 final_score 普遍偏低，0.3 更合适
+  off_topic_threshold: 0.3      # vector_score 低于此值时判定为无关问题
 
   hybrid_search:
     enabled: true

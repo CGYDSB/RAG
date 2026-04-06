@@ -2,12 +2,17 @@
 DataLoader — 文档加载模块
 
 支持格式：PDF / TXT / MD / DOCX / HTML
+
+改进（策略一 + 策略五）：
+- 策略一：提取 PDF Outline，建立页码 → 标题路径映射，供切分器注入 section_path
+- 策略五：过滤目录页，避免目录条目干扰检索
 """
 
 import os
+import re
 import uuid
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from loguru import logger
 
@@ -17,14 +22,6 @@ from loguru import logger
 # =========================================
 @dataclass
 class Document:
-    """
-    标准文档结构
-
-    Attributes:
-        content:  文档正文
-        metadata: 元信息（来源、文件名、页码等）
-        doc_id:   唯一标识
-    """
     content: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     doc_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -38,27 +35,21 @@ class Document:
 # 文档加载器
 # =========================================
 class DataLoader:
-    """
-    多格式文档加载器
-
-    用法：
-        loader = DataLoader()
-        doc  = loader.load_document("report.pdf")
-        docs = loader.load_directory("data/raw/")
-    """
 
     SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx", ".html", ".htm"}
+
+    # 目录页关键词（策略五）
+    _TOC_PATTERN = re.compile(
+        r'^(contents|目录|目次|table\s+of\s+contents|致谢|acknowledgements?)$',
+        re.IGNORECASE
+    )
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self.max_file_size_mb = self.config.get("max_file_size", 50)
 
-    # --------------------------------------------------
-    # 单文件加载（根据扩展名分发）
-    # --------------------------------------------------
     def load_document(self, path) -> Document:
         path = Path(path)
-
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
 
@@ -80,7 +71,6 @@ class DataLoader:
         }
 
         content, metadata = loaders[ext](path)
-
         metadata.update({
             "source": str(path),
             "filename": path.name,
@@ -91,12 +81,8 @@ class DataLoader:
         logger.info(f"Loaded: {path.name} ({len(content)} chars)")
         return Document(content=content, metadata=metadata)
 
-    # --------------------------------------------------
-    # 目录批量加载
-    # --------------------------------------------------
     def load_directory(self, directory, recursive: bool = True) -> List[Document]:
         directory = Path(directory)
-
         if not directory.is_dir():
             raise NotADirectoryError(f"Not a directory: {directory}")
 
@@ -105,7 +91,6 @@ class DataLoader:
             f for f in directory.glob(pattern)
             if f.is_file() and f.suffix.lower() in self.SUPPORTED_EXTENSIONS
         ]
-
         logger.info(f"Found {len(files)} files in {directory}")
 
         documents = []
@@ -119,63 +104,151 @@ class DataLoader:
         return documents
 
     # --------------------------------------------------
-    # PDF 加载
+    # PDF 加载（含策略一 Outline 提取 + 策略五目录过滤）
     # --------------------------------------------------
-    def _load_pdf(self, path: Path):
+    def _load_pdf(self, path: Path) -> Tuple[str, Dict]:
         try:
             from pypdf import PdfReader
         except ImportError:
             raise ImportError("pypdf not installed. Run: pip install pypdf")
 
         reader = PdfReader(str(path))
-        pages = []
+        total_pages = len(reader.pages)
 
+        # 策略一：提取书签目录，建立 0-based 页码 → 标题名称 映射
+        outline_entries = self._extract_outline(reader)
+        page_to_section = self._build_page_to_section(outline_entries, total_pages)
+        if outline_entries:
+            logger.info(f"Outline: {len(outline_entries)} entries from {path.name}")
+
+        # 策略五：识别目录页范围，后续跳过
+        toc_pages = self._detect_toc_pages(reader, total_pages)
+        if toc_pages:
+            logger.info(f"TOC pages filtered: {sorted(toc_pages)} in {path.name}")
+
+        pages = []
         for i, page in enumerate(reader.pages):
+            # 策略五：跳过目录页
+            if i in toc_pages:
+                continue
+
             text = page.extract_text() or ""
             if text.strip():
                 text = self._clean_pdf_text(text)
-                # 在每页开头插入页码标记，切分后 chunk 可以反查
+                # 插入页码标记（1-based），切分器据此追踪页码
                 pages.append(f"[PAGE:{i+1}] {text}")
 
         content = "\n\n".join(pages)
-        metadata = {"page_count": len(reader.pages), "type": "pdf"}
+        metadata = {
+            "page_count": total_pages,
+            "type": "pdf",
+            # page_to_section 传给切分器使用，不直接存入 chunk metadata
+            "_page_to_section": page_to_section,
+        }
         return content, metadata
 
+    # --------------------------------------------------
+    # 策略一：提取 PDF Outline
+    # --------------------------------------------------
+    def _extract_outline(self, reader) -> List[Dict]:
+        """
+        递归遍历 PDF 书签树，返回按页码排序的条目列表。
+        每项：{'title': str, 'page': int, 'level': int}
+        """
+        entries = []
+
+        def _walk(items, level=1):
+            for item in items:
+                if isinstance(item, list):
+                    _walk(item, level + 1)
+                else:
+                    try:
+                        page_num = reader.get_destination_page_number(item)
+                        title = (item.title or "").strip()
+                        if title:
+                            entries.append({'title': title, 'page': page_num, 'level': level})
+                    except Exception:
+                        pass
+
+        try:
+            _walk(reader.outline)
+        except Exception as e:
+            logger.debug(f"Outline extraction failed: {e}")
+
+        return sorted(entries, key=lambda x: x['page'])
+
+    def _build_page_to_section(self, entries: List[Dict], total_pages: int) -> Dict[int, str]:
+        """
+        按页码区间建立 0-based page → section_title 映射。
+        chunk 所在页落在哪两个相邻书签之间，就归属于前一个书签。
+        """
+        if not entries:
+            return {}
+        mapping = {}
+        for i, entry in enumerate(entries):
+            end = entries[i + 1]['page'] if i + 1 < len(entries) else total_pages
+            for p in range(entry['page'], end):
+                mapping[p] = entry['title']
+        return mapping
+
+    # --------------------------------------------------
+    # 策略五：检测目录页
+    # --------------------------------------------------
+    def _detect_toc_pages(self, reader, total_pages: int) -> set:
+        """
+        识别目录页：找到含目录关键词的页面，并把其后连续的目录条目页也纳入过滤范围。
+        只扫描前 20% 的页面，避免误伤正文。
+        """
+        toc_pages = set()
+        scan_limit = max(1, int(total_pages * 0.2))
+
+        for i in range(min(scan_limit, total_pages)):
+            text = (reader.pages[i].extract_text() or "").strip()
+            first_line = text.split('\n')[0].strip() if text else ""
+            # 去除全角空格后匹配
+            normalized = re.sub(r'[\s\u3000]+', '', first_line)
+            if self._TOC_PATTERN.match(normalized):
+                toc_pages.add(i)
+                # 把紧随其后、内容像目录条目的页也过滤掉（最多连续 10 页）
+                for j in range(i + 1, min(i + 11, total_pages)):
+                    next_text = reader.pages[j].extract_text() or ""
+                    # 目录条目特征：大量省略号或页码数字结尾
+                    if re.search(r'\.{3,}|\s\d{1,4}\s*$', next_text, re.MULTILINE):
+                        toc_pages.add(j)
+                    else:
+                        break
+                break  # 一个文档通常只有一个目录
+
+        return toc_pages
+
+    # --------------------------------------------------
+    # PDF 文本清洗
+    # --------------------------------------------------
     def _clean_pdf_text(self, text: str) -> str:
-        """清洗PDF提取的文本，去除多余空白和断行"""
-        import re
-        # 把单个换行（断词）替换为空格，保留双换行（段落）
         text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-        # 去除多余空格和制表符
         text = re.sub(r'[ \t]+', ' ', text)
-        # 还原段落分隔
         text = re.sub(r'\n{3,}', '\n\n', text)
-        # 关键：去除中文字符之间的空格（PDF提取常见问题）
         text = re.sub(r'(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])', '', text)
-        # 去除中文和标点之间的空格
         text = re.sub(r'(?<=[\u4e00-\u9fff])\s+(?=[，。！？、；：""''（）【】])', '', text)
         text = re.sub(r'(?<=[，。！？、；：""''（）【】])\s+(?=[\u4e00-\u9fff])', '', text)
         return text.strip()
 
     # --------------------------------------------------
-    # TXT / MD 加载
+    # TXT / MD
     # --------------------------------------------------
-    def _load_text(self, path: Path):
-        encodings = ["utf-8", "utf-8-sig", "gbk", "latin-1"]
-
-        for enc in encodings:
+    def _load_text(self, path: Path) -> Tuple[str, Dict]:
+        for enc in ["utf-8", "utf-8-sig", "gbk", "latin-1"]:
             try:
                 content = path.read_text(encoding=enc)
                 return content, {"type": path.suffix.lstrip(".")}
             except UnicodeDecodeError:
                 continue
-
         raise ValueError(f"Cannot decode file: {path}")
 
     # --------------------------------------------------
-    # DOCX 加载
+    # DOCX
     # --------------------------------------------------
-    def _load_docx(self, path: Path):
+    def _load_docx(self, path: Path) -> Tuple[str, Dict]:
         try:
             from docx import Document as DocxDocument
         except ImportError:
@@ -184,13 +257,12 @@ class DataLoader:
         doc = DocxDocument(str(path))
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         content = "\n\n".join(paragraphs)
-        metadata = {"paragraph_count": len(paragraphs), "type": "docx"}
-        return content, metadata
+        return content, {"paragraph_count": len(paragraphs), "type": "docx"}
 
     # --------------------------------------------------
-    # HTML 加载
+    # HTML
     # --------------------------------------------------
-    def _load_html(self, path: Path):
+    def _load_html(self, path: Path) -> Tuple[str, Dict]:
         try:
             from bs4 import BeautifulSoup
         except ImportError:
@@ -198,12 +270,8 @@ class DataLoader:
 
         html = path.read_text(encoding="utf-8", errors="ignore")
         soup = BeautifulSoup(html, "html.parser")
-
-        # 移除 script / style 标签
         for tag in soup(["script", "style", "nav", "footer"]):
             tag.decompose()
-
         content = soup.get_text(separator="\n", strip=True)
         title = soup.title.string if soup.title else ""
-        metadata = {"title": title, "type": "html"}
-        return content, metadata
+        return content, {"title": title, "type": "html"}

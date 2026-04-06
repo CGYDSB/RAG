@@ -466,9 +466,12 @@ class RAGPipeline:
         threshold = self.config.get('retrieval', {}).get('similarity_threshold', 0.3)
         filtered_chunks = [c for c in retrieved_chunks if c.final_score >= threshold]
 
-        # 如果所有 chunk 分数都很低，说明问题与文档完全无关，直接返回
+        # 无关问题检测：只有在完全没有 chunk 通过阈值时才拒答
+        # 不依赖 final_score 绝对值（混合检索归一化后分数普遍偏低），
+        # 改为：若最高分 chunk 的 vector_score 低于 off_topic_threshold 则判定无关
         off_topic_threshold = self.config.get('retrieval', {}).get('off_topic_threshold', 0.3)
-        if not filtered_chunks or (retrieved_chunks and retrieved_chunks[0].final_score < off_topic_threshold):
+        top_vector_score = retrieved_chunks[0].vector_score if retrieved_chunks else 0
+        if not filtered_chunks and top_vector_score < off_topic_threshold:
             return RAGResponse(
                 answer="抱歉，您的问题超出了我的知识范围，我只能回答与文档相关的技术问题。",
                 sources=[],
@@ -557,6 +560,11 @@ class RAGPipeline:
             citation = f"[[{i+1}]]"
             text = chunk.text
 
+            # 如果 chunk 有标题路径，前置显示，帮助 LLM 理解归属
+            section_path = chunk.metadata.get('section_path', '') if chunk.metadata else ''
+            if section_path:
+                text = f"[{section_path}]\n{text}"
+
             # 单个 chunk 超过 800 字符时截断，保留最相关部分
             if len(text) > 800:
                 text = text[:800] + "..."
@@ -592,7 +600,8 @@ class RAGPipeline:
                 "index": i + 1,
                 "text": c.text[:200],
                 "metadata": c.metadata,
-                "score": c.final_score
+                "score": c.final_score,
+                "section_path": c.metadata.get('section_path', '') if c.metadata else '',
             }
             for i, c in enumerate(chunks)
         ]

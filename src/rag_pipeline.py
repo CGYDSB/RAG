@@ -441,6 +441,20 @@ class RAGPipeline:
 
         logger.info("Indexing completed")
 
+        # -------- 4. 构建关键词索引并持久化 --------
+        # 从向量库读取所有 chunk，重建关键词倒排索引
+        # 解决：关键词索引未初始化导致混合检索退化为纯向量检索的问题
+        try:
+            all_results = self.vector_store.collection.get()
+            keyword_docs = [
+                {"id": all_results["ids"][i], "text": all_results["documents"][i]}
+                for i in range(len(all_results["ids"]))
+            ]
+            self.retriever.hybrid.build_keyword_index(keyword_docs)
+            self.retriever.hybrid.save_index()
+        except Exception as e:
+            logger.warning(f"Keyword index build failed: {e}")
+
     # =========================================================
     # 查询入口（RAG 主逻辑）
     # =========================================================
@@ -453,7 +467,12 @@ class RAGPipeline:
     ) -> Union[RAGResponse, Iterator[str]]:
 
         # -------- 1. 检索 --------
-        retrieved_chunks = self.retriever.retrieve(question, top_k=top_k)
+        # 优先级 4：多轮对话查询改写，消除指代词歧义
+        retrieval_question = question
+        if use_history and self.conversation.history:
+            retrieval_question = self._rewrite_question(question)
+
+        retrieved_chunks = self.retriever.retrieve(retrieval_question, top_k=top_k)
 
         if not retrieved_chunks:
             return RAGResponse(
@@ -560,10 +579,12 @@ class RAGPipeline:
             citation = f"[[{i+1}]]"
             text = chunk.text
 
-            # 如果 chunk 有标题路径，前置显示，帮助 LLM 理解归属
+            # 优先级 3：chunk 格式化加入文档名，帮助 LLM 感知内容来源
+            filename = chunk.metadata.get('filename', '') if chunk.metadata else ''
             section_path = chunk.metadata.get('section_path', '') if chunk.metadata else ''
-            if section_path:
-                text = f"[{section_path}]\n{text}"
+            header = ' | '.join(filter(None, [filename, section_path]))
+            if header:
+                text = f"[{header}]\n{text}"
 
             # 单个 chunk 超过 800 字符时截断，保留最相关部分
             if len(text) > 800:
@@ -595,6 +616,9 @@ class RAGPipeline:
 
         result = self.generator.generate(prompt, config)
 
+        # 优先级 1：引用验证——过滤超出范围的引用序号，防止引用幻觉
+        answer_text = self._fix_citations(result.text, len(chunks))
+
         sources = [
             {
                 "index": i + 1,
@@ -610,12 +634,12 @@ class RAGPipeline:
         if self.evaluator:
             evaluation = self.evaluator.evaluate(
                 question=question,
-                answer=result.text,
+                answer=answer_text,
                 contexts=[c.text for c in chunks]
             )
 
         return RAGResponse(
-            answer=result.text,
+            answer=answer_text,
             sources=sources,
             metadata={
                 "retrieved_count": len(chunks),
@@ -648,6 +672,59 @@ class RAGPipeline:
         # 再流式输出答案
         for token in self.generator.generate_stream(prompt, config):
             yield token
+
+    # =========================================================
+    # 优先级 1：引用验证（过滤超出范围的引用序号）
+    # =========================================================
+    @staticmethod
+    def _fix_citations(text: str, max_idx: int) -> str:
+        """
+        过滤答案中超出 chunk 范围的引用序号。
+        例如只有 5 个 chunk，但 LLM 生成了 [[6]]，则删除该引用。
+        """
+        import re
+        def replace(m):
+            idx = int(m.group(1))
+            return m.group(0) if 1 <= idx <= max_idx else ''
+        return re.sub(r'\[\[(\d+)\]\]', replace, text)
+
+    # =========================================================
+    # 优先级 4：多轮对话查询改写（消除指代词歧义）
+    # =========================================================
+    def _rewrite_question(self, question: str) -> str:
+        """
+        当有对话历史时，用 LLM 把含指代词的问题改写为完整问题。
+        例如："它的参数是多少？" → "液压泵 HPV-135 的参数是多少？"
+        改写失败时返回原始问题，不影响主流程。
+        """
+        recent = self.conversation.format_recent_history()
+        if not recent:
+            return question
+
+        # 简单判断：问题里有指代词才改写，避免无谓的 LLM 调用
+        pronouns = ['它', '这个', '该', '上述', '前面', '之前', '其', '这些', '那个']
+        if not any(p in question for p in pronouns):
+            return question
+
+        prompt = (
+            f"历史对话：\n{recent}\n\n"
+            f"当前问题：{question}\n\n"
+            f"如果当前问题包含指代词（它、这个、该、上述等），请将其替换为具体内容，改写为完整问题；"
+            f"如果问题已经完整，原样返回。只输出改写后的问题，不要解释。\n"
+            f"改写后的问题："
+        )
+        try:
+            result = self.generator.generate(
+                prompt,
+                GenerationConfig(temperature=0, max_tokens=100)
+            )
+            rewritten = result.text.strip()
+            if rewritten and len(rewritten) < len(question) * 3:  # 防止改写过长
+                logger.debug(f"Query rewritten: '{question}' → '{rewritten}'")
+                return rewritten
+        except Exception as e:
+            logger.debug(f"Query rewrite failed: {e}")
+        return question
 
     # =========================================================
     # 统计信息

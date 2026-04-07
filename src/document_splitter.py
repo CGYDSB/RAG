@@ -52,7 +52,7 @@ class RecursiveCharacterSplitter(BaseSplitter):
         self.min_chunk_size = min_chunk_size
         self.keep_separator = keep_separator
         self.length_function = length_function
-        self.separators = separators or ["\n\n", "\n", ". ", " ", ""]
+        self.separators = separators or ["\n\n", "\n", "。", "！", "？", "；", ". ", " ", ""]
         logger.info(f"RecursiveCharacterSplitter init (chunk_size={chunk_size}, overlap={chunk_overlap}, min={min_chunk_size})")
 
     def split(self, document: Document) -> List[TextChunk]:

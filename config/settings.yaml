@@ -71,7 +71,7 @@ document:
     ocr_enabled: false
 
   splitting:
-    separators: ["\n\n", "\n", ". ", " ", ""]
+    separators: ["\n\n", "\n", "。", "！", "？", "；", ". ", " ", ""]
     keep_separator: true
     is_separator_regex: true
 

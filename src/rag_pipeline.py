@@ -549,6 +549,16 @@ class RAGPipeline:
         except KeyError:
             prompt = f"上下文：{context}\n\n问题：{question}\n\n回答："
 
+        # 优化四：Prompt 超限兜底——丢弃历史，只保留 context + question
+        prompt_tokens = self._count_tokens(prompt)
+        if prompt_tokens > self.max_total_tokens:
+            logger.warning(f"Prompt too long ({prompt_tokens} tokens), dropping history")
+            try:
+                fallback_template = self.prompt_manager.get('system.rag_assistant')
+                prompt = fallback_template.format(context=context, question=question)
+            except Exception:
+                prompt = f"上下文：{context}\n\n问题：{question}\n\n回答："
+
         # -------- 7. 生成答案 --------
         if stream:
             return self._stream_response(prompt, filtered_chunks, question)
@@ -566,52 +576,65 @@ class RAGPipeline:
         """
         在 token 预算内构建上下文
 
-        策略：
-        1. 按相关性排序，优先保留高分 chunk
-        2. 每个 chunk 超过预算时截断
+        优化：
+        1. 不截断单个 chunk（整体丢弃低相关 chunk，保证语义完整性）
+        2. 精确 token 计数（tiktoken，降级为字符估算）
         3. 总长度不超过 context token 预算
         """
-        budget_chars = self.token_budget['context'] * 3  # 粗略估算：1 token ≈ 3 字符
+        budget_tokens = self.token_budget['context']
         context_parts = []
-        total = 0
+        used_tokens = 0
 
         for i, chunk in enumerate(chunks):
             citation = f"[[{i+1}]]"
             text = chunk.text
 
-            # 优先级 3：chunk 格式化加入文档名，帮助 LLM 感知内容来源
+            # chunk 格式化加入文档名，帮助 LLM 感知内容来源
             filename = chunk.metadata.get('filename', '') if chunk.metadata else ''
             section_path = chunk.metadata.get('section_path', '') if chunk.metadata else ''
             header = ' | '.join(filter(None, [filename, section_path]))
             if header:
                 text = f"[{header}]\n{text}"
 
-            # 单个 chunk 超过 800 字符时截断，保留最相关部分
-            if len(text) > 800:
-                text = text[:800] + "..."
-
             formatted = f"{citation} {text}"
+            chunk_tokens = self._count_tokens(formatted)
 
-            if total + len(formatted) > budget_chars:
-                # 预算不足，尝试塞入截断版本
-                remaining = budget_chars - total
-                if remaining > 100:
-                    context_parts.append(f"{citation} {text[:remaining-50]}...")
+            # 优化一：超出预算时整体跳过，不截断单个 chunk
+            if used_tokens + chunk_tokens > budget_tokens:
                 break
 
             context_parts.append(formatted)
-            total += len(formatted)
+            used_tokens += chunk_tokens
 
         return "\n\n".join(context_parts)
+
+    @staticmethod
+    def _count_tokens(text: str) -> int:
+        """
+        优化二：精确 token 计数，降级为字符估算。
+        tiktoken 未安装时自动降级（1 token ≈ 2.5 字符，中英混合更准确）。
+        """
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except ImportError:
+            return len(text) // 2  # 中英混合文本，2.5 字符/token 更接近实际
 
     # =========================================================
     # 非流式生成
     # =========================================================
     def _generate_response(self, prompt, chunks, question) -> RAGResponse:
 
+        # 优化三：动态生成预算——确保输入 + 输出不超过模型上下文窗口
+        input_tokens = self._count_tokens(prompt)
+        max_window = self.max_total_tokens
+        available_for_output = max(300, max_window - input_tokens)
+        configured_max = self.config.get('llm', {}).get('max_tokens', 2000)
+
         config = GenerationConfig(
             temperature=self.config.get('llm', {}).get('temperature', 0.1),
-            max_tokens=self.config.get('llm', {}).get('max_tokens', 2000)
+            max_tokens=min(configured_max, available_for_output)
         )
 
         result = self.generator.generate(prompt, config)

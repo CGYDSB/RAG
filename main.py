@@ -344,6 +344,70 @@ def evaluate_command(args):
 
 
 # =========================
+# 新增：generate-finetune-data 命令
+# =========================
+def generate_finetune_data_command(args):
+    """
+    功能：从文档库生成微调用的合成问答对
+
+    流程：
+    1. 加载文档并切分（450字符/80重叠）
+    2. 对每个 chunk 调用 LLM 生成 5 个问答对
+    3. 自动过滤（格式校验 + 幻觉检测）
+    4. 保存为 JSONL 格式
+    """
+    from src.finetune_data_generator import FinetuneDataGenerator
+
+    logger.info(f"Generating finetune data from: {args.source}")
+
+    generator = FinetuneDataGenerator.from_config('config/settings.yaml')
+    count = generator.generate(
+        source=args.source,
+        output_path=args.output,
+        max_chunks=args.max_chunks
+    )
+    logger.info(f"Saved {count} valid QA pairs to: {args.output}")
+
+
+# =========================
+# 新增：finetune 命令
+# =========================
+def finetune_command(args):
+    """
+    功能：微调 Embedding 模型
+
+    流程：
+    1. 加载 JSONL 问答对数据集
+    2. 按文档来源划分训练/测试集
+    3. 使用 MultipleNegativesRankingLoss 微调
+    4. 评估并对比微调前后性能
+    """
+    from src.finetune_data_generator import load_qa_dataset
+    from src.embedding_finetuner import EmbeddingFinetuner
+
+    logger.info(f"Loading dataset from: {args.data}")
+
+    train_pairs, test_pairs = load_qa_dataset(args.data, train_ratio=0.8)
+
+    finetuner = EmbeddingFinetuner(
+        base_model=args.base_model,
+        output_path=args.output,
+        device=args.device
+    )
+
+    finetuner.train(
+        train_pairs=train_pairs,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.lr,
+    )
+
+    if test_pairs:
+        logger.info("Comparing fine-tuned model with baseline...")
+        finetuner.compare_with_baseline(test_pairs, top_k=10)
+
+
+# =========================
 # 8. CLI 主入口
 # =========================
 def main():
@@ -426,6 +490,43 @@ def main():
     eval_parser.add_argument('--output', '-o',
                              help='评估报告输出路径（不填则只打印到终端）')  # 可选，不填则只打印
     eval_parser.set_defaults(func=evaluate_command)
+
+    # ===== generate-finetune-data 子命令：生成微调数据 =====
+    # 用法：python main.py generate-finetune-data --source data/raw/ [--output data/finetune/qa_pairs.jsonl]
+    gen_ft_parser = subparsers.add_parser(
+        'generate-finetune-data',
+        help='从文档库生成 Embedding 微调用的合成问答对（参考 MIRACLE 论文）'
+    )
+    gen_ft_parser.add_argument('--source', '-s', required=True,
+                               help='文档路径（文件或目录）')
+    gen_ft_parser.add_argument('--output', '-o',
+                               default='data/finetune/qa_pairs.jsonl',
+                               help='输出 JSONL 文件路径，默认 data/finetune/qa_pairs.jsonl')
+    gen_ft_parser.add_argument('--max-chunks', type=int, default=None,
+                               help='最多处理的 chunk 数（调试时可设小值，如 20）')
+    gen_ft_parser.set_defaults(func=generate_finetune_data_command)
+
+    # ===== finetune 子命令：微调 Embedding 模型 =====
+    # 用法：python main.py finetune --data data/finetune/qa_pairs.jsonl
+    ft_parser = subparsers.add_parser(
+        'finetune',
+        help='使用合成问答对微调 Embedding 模型（MultipleNegativesRankingLoss）'
+    )
+    ft_parser.add_argument('--data', '-d', required=True,
+                           help='JSONL 问答对文件路径（由 generate-finetune-data 生成）')
+    ft_parser.add_argument('--base-model', default='BAAI/bge-small-zh-v1.5',
+                           help='基础模型名称或路径，默认 BAAI/bge-small-zh-v1.5')
+    ft_parser.add_argument('--output', '-o', default='models/medical-bge-finetuned',
+                           help='微调后模型保存路径，默认 models/medical-bge-finetuned')
+    ft_parser.add_argument('--epochs', type=int, default=1,
+                           help='训练轮数，默认 1（论文建议单 epoch 防过拟合）')
+    ft_parser.add_argument('--batch-size', '-b', type=int, default=32,
+                           help='批大小，CPU 建议 32-64，默认 32')
+    ft_parser.add_argument('--lr', type=float, default=2e-5,
+                           help='学习率，默认 2e-5（与论文一致）')
+    ft_parser.add_argument('--device', default='cpu',
+                           help='训练设备，cpu 或 cuda，默认 cpu')
+    ft_parser.set_defaults(func=finetune_command)
 
     # 解析命令行参数
     args = parser.parse_args()

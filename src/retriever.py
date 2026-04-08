@@ -67,18 +67,28 @@ class HybridRetriever(BaseRetriever):
 
     def __init__(self, vector_store, embedding_model,
                  vector_weight: float = 0.7, keyword_weight: float = 0.3,
-                 index_path: str = "data/keyword_index.pkl"):
+                 index_path: str = "data/keyword_index.pkl",
+                 keyword_method: str = "bm25"):
+        """
+        Args:
+            keyword_method: 关键词评分方式，"tfidf" 或 "bm25"（默认）
+                - tfidf: TF × IDF，简单快速
+                - bm25:  BM25，加入 TF 饱和 + 文档长度归一化，精度更高
+        """
         self.vector_store = vector_store
         self.embedding_model = embedding_model
         self.vector_weight = vector_weight
         self.keyword_weight = keyword_weight
         self.index_path = index_path
+        self.keyword_method = keyword_method
         self._keyword_index: Dict = {}
         self._total_docs: int = 0
+        self._doc_lengths: Dict = {}   # BM25 需要：每个文档的 token 数
+        self._avg_doc_length: float = 0.0  # BM25 需要：平均文档长度
 
         # 尝试加载持久化的关键词索引
         self._load_index()
-        logger.info(f"HybridRetriever initialized (keyword_docs={self._total_docs})")
+        logger.info(f"HybridRetriever initialized (keyword_docs={self._total_docs}, method={keyword_method})")
 
     # --------------------------------------------------
     # 优化一 + 二：中文分词 + 词权重差异化
@@ -111,18 +121,29 @@ class HybridRetriever(BaseRetriever):
                     if t not in self._EN_STOPWORDS and len(t) > 2]
 
     def build_keyword_index(self, documents: List[Dict]) -> None:
-        """构建关键词倒排索引"""
+        """构建关键词倒排索引，同时记录文档长度（BM25 需要）"""
         self._keyword_index = {}
+        self._doc_lengths = {}
         self._total_docs = 0
+        total_length = 0
+
         for doc in documents:
             doc_id = doc["id"]
             tokens = self._tokenize(doc["text"])
+            self._doc_lengths[doc_id] = len(tokens)
+            total_length += len(tokens)
             for token in tokens:
                 self._keyword_index.setdefault(token, {})
                 self._keyword_index[token][doc_id] = \
                     self._keyword_index[token].get(doc_id, 0) + 1
             self._total_docs += 1
-        logger.info(f"Keyword index built: {self._total_docs} docs, {len(self._keyword_index)} terms")
+
+        self._avg_doc_length = total_length / self._total_docs if self._total_docs > 0 else 1.0
+        logger.info(
+            f"Keyword index built: {self._total_docs} docs, "
+            f"{len(self._keyword_index)} terms, "
+            f"avg_doc_len={self._avg_doc_length:.1f}"
+        )
 
     # --------------------------------------------------
     # 优化三：索引持久化
@@ -133,7 +154,9 @@ class HybridRetriever(BaseRetriever):
         with open(self.index_path, "wb") as f:
             pickle.dump({
                 "index": self._keyword_index,
-                "total_docs": self._total_docs
+                "total_docs": self._total_docs,
+                "doc_lengths": self._doc_lengths,
+                "avg_doc_length": self._avg_doc_length,
             }, f)
         logger.info(f"Keyword index saved: {self.index_path}")
 
@@ -145,6 +168,8 @@ class HybridRetriever(BaseRetriever):
                     data = pickle.load(f)
                 self._keyword_index = data.get("index", {})
                 self._total_docs = data.get("total_docs", 0)
+                self._doc_lengths = data.get("doc_lengths", {})
+                self._avg_doc_length = data.get("avg_doc_length", 1.0)
                 logger.info(f"Keyword index loaded: {self._total_docs} docs, {len(self._keyword_index)} terms")
             except Exception as e:
                 logger.warning(f"Failed to load keyword index: {e}")
@@ -154,12 +179,30 @@ class HybridRetriever(BaseRetriever):
             return []
         tokens = self._tokenize(query)
         scores: Dict = defaultdict(float)
-        for token in tokens:
-            if token not in self._keyword_index:
-                continue
-            idf = np.log((self._total_docs + 1) / (len(self._keyword_index[token]) + 1))
-            for doc_id, freq in self._keyword_index[token].items():
-                scores[doc_id] += freq * idf
+
+        if self.keyword_method == "bm25":
+            # BM25 参数（标准默认值）
+            k1 = 1.5   # TF 饱和系数，越大词频影响越强
+            b = 0.75   # 文档长度归一化系数，0=不归一化，1=完全归一化
+            for token in tokens:
+                if token not in self._keyword_index:
+                    continue
+                df = len(self._keyword_index[token])
+                idf = np.log((self._total_docs - df + 0.5) / (df + 0.5) + 1)
+                for doc_id, tf in self._keyword_index[token].items():
+                    dl = self._doc_lengths.get(doc_id, self._avg_doc_length)
+                    # BM25 TF 饱和 + 文档长度归一化
+                    tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / self._avg_doc_length))
+                    scores[doc_id] += idf * tf_norm
+        else:
+            # TF-IDF（原有逻辑）
+            for token in tokens:
+                if token not in self._keyword_index:
+                    continue
+                idf = np.log((self._total_docs + 1) / (len(self._keyword_index[token]) + 1))
+                for doc_id, freq in self._keyword_index[token].items():
+                    scores[doc_id] += freq * idf
+
         return [
             {"id": k, "score": v}
             for k, v in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
@@ -279,6 +322,7 @@ class AdvancedRetriever:
             vector_store, embedding_model,
             vector_weight=hybrid_cfg.get("vector_weight", 0.7),
             keyword_weight=hybrid_cfg.get("keyword_weight", 0.3),
+            keyword_method=hybrid_cfg.get("keyword_method", "bm25"),
         )
         self.expander = QueryExpander()
 

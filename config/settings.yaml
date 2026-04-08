@@ -71,7 +71,7 @@ document:
     ocr_enabled: false
 
   splitting:
-    separators: ["\n\n", "\n",  ". ", " ", ""]
+    separators: ["\n\n", "\n", "。", "！", "？", "；", ". ", " ", ""]
     keep_separator: true
     is_separator_regex: true
 
@@ -85,6 +85,7 @@ retrieval:
     enabled: true
     vector_weight: 0.7
     keyword_weight: 0.3
+    keyword_method: "bm25"   # "bm25" 或 "tfidf"，BM25 加入 TF 饱和 + 文档长度归一化
 
   reranker:
     enabled: false              # CPU 上关闭，避免额外下载模型和性能开销

@@ -29,12 +29,12 @@ from loguru import logger
 # =========================
 # 数据加载模块
 # =========================
-from .data_loader import DataLoader, Document
+from .ingestion.loader import DataLoader, Document
 
 # =========================
 # 文档切分模块
 # =========================
-from .document_splitter import (
+from .ingestion.splitter import (
     RecursiveCharacterSplitter,
     TextChunk,
     SplitterFactory
@@ -43,7 +43,7 @@ from .document_splitter import (
 # =========================
 # 向量化模型
 # =========================
-from .embedding_model import (
+from .embedding.model import (
     EmbeddingModelFactory,
     BaseEmbeddingModel
 )
@@ -51,7 +51,7 @@ from .embedding_model import (
 # =========================
 # 向量数据库
 # =========================
-from .vector_store import (
+from .retrieval.vector_store import (
     VectorStoreFactory,
     BaseVectorStore,
     VectorRecord
@@ -60,12 +60,12 @@ from .vector_store import (
 # =========================
 # 检索器（混合检索 / 重排序）
 # =========================
-from .retriever import AdvancedRetriever
+from .retrieval.retriever import AdvancedRetriever
 
 # =========================
 # LLM 生成模块
 # =========================
-from .generator import (
+from .generation.generator import (
     GeneratorFactory,
     PromptManager,
     ContextBuilder,
@@ -76,7 +76,7 @@ from .generator import (
 # =========================
 # 评估模块（可选）
 # =========================
-from .evaluation import RAGEvaluator
+from .evaluation.metrics import RAGEvaluator
 
 
 # =========================================================
@@ -570,7 +570,7 @@ class RAGPipeline:
             else:
                 template = self.prompt_manager.get('system.rag_assistant')
         except KeyError:
-            from .generator import PromptTemplate
+            from .generation.generator import PromptTemplate
             template = PromptTemplate(
                 "根据以下上下文回答问题。\n上下文：{context}\n问题：{question}\n回答："
             )

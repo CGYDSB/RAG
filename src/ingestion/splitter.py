@@ -3,7 +3,7 @@ from typing import List, Optional, Callable, Dict
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from loguru import logger
-from .data_loader import Document
+from .loader import Document
 
 
 @dataclass

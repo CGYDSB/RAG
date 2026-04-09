@@ -51,8 +51,8 @@ import yaml
 # =========================
 # 3. 导入 RAG 核心模块
 # =========================
-from src.rag_pipeline import RAGPipeline
-from src.data_loader import DataLoader, Document
+from src.pipeline import RAGPipeline
+from src.ingestion.loader import DataLoader, Document
 
 # =========================
 # 4. 导入 API 数据契约（schemas）

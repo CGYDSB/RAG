@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from loguru import logger
 import yaml
-from src.rag_pipeline import RAGPipeline
+from src.pipeline import RAGPipeline
 
 
 # =========================
@@ -356,7 +356,7 @@ def generate_finetune_data_command(args):
     3. 自动过滤（格式校验 + 幻觉检测）
     4. 保存为 JSONL 格式
     """
-    from src.finetune_data_generator import FinetuneDataGenerator
+    from src.embedding.data_gen import FinetuneDataGenerator
 
     logger.info(f"Generating finetune data from: {args.source}")
 
@@ -382,8 +382,8 @@ def finetune_command(args):
     3. 使用 MultipleNegativesRankingLoss 微调
     4. 评估并对比微调前后性能
     """
-    from src.finetune_data_generator import load_qa_dataset
-    from src.embedding_finetuner import EmbeddingFinetuner
+    from src.embedding.data_gen import load_qa_dataset
+    from src.embedding.finetuner import EmbeddingFinetuner
 
     logger.info(f"Loading dataset from: {args.data}")
 

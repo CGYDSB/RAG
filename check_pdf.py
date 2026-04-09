@@ -1,4 +1,4 @@
-from src.data_loader import DataLoader
+from src.ingestion.loader import DataLoader
 
 loader = DataLoader()
 doc = loader.load_document('data/raw/python-doc-27-34.pdf')

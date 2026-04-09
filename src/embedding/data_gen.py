@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from loguru import logger
 
-from .data_loader import DataLoader
-from .document_splitter import RecursiveCharacterSplitter
-from .generator import OpenAIGenerator, GenerationConfig
+from ..ingestion.loader import DataLoader
+from ..ingestion.splitter import RecursiveCharacterSplitter
+from ..generation.generator import OpenAIGenerator, GenerationConfig
 
 
 # =========================================

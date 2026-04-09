@@ -1,4 +1,4 @@
-from src.rag_pipeline import RAGPipeline
+from src.pipeline import RAGPipeline
 
 pipeline = RAGPipeline.from_config('config/settings.yaml')
 chunks = pipeline.retriever.retrieve("在Python源文件中可以使用非ASCII编码吗", top_k=5)

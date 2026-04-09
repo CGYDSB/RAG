@@ -32,11 +32,11 @@ from pathlib import Path
 # =========================
 # 📌 被测试的核心模块
 # =========================
-from src.data_loader import DataLoader, Document
-from src.document_splitter import RecursiveCharacterSplitter
-from src.embedding_model import SentenceTransformerEmbedding
-from src.vector_store import ChromaVectorStore
-from src.rag_pipeline import RAGPipeline
+from src.ingestion.loader import DataLoader, Document
+from src.ingestion.splitter import RecursiveCharacterSplitter
+from src.embedding.model import SentenceTransformerEmbedding
+from src.retrieval.vector_store import ChromaVectorStore
+from src.pipeline import RAGPipeline
 
 
 # ====================================================
@@ -160,7 +160,7 @@ class TestVectorStore:
                 persist_directory=tmpdir
             )
 
-            from src.vector_store import VectorRecord
+            from src.retrieval.vector_store import VectorRecord
 
             records = [
                 VectorRecord(

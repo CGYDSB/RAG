@@ -36,7 +36,30 @@ LLM 看到的每个 chunk 格式如下：
 
 `[[序号]]` 是引用锚点，LLM 生成答案时用这个序号标注来源；`[文件名 | 章节名]` 让 LLM 知道内容归属，多文档场景下不会混淆不同来源的信息。
 
-### 1.2 Token 预算控制：整体跳过低相关 chunk
+### 1.2 父子 chunk：检索用子块，喂给 LLM 用父块
+
+开启父子分块后，向量检索命中的是**子块**（256字符，语义精准），但实际送给 LLM 的是对应的**父块**（1024字符，上下文完整）：
+
+```python
+# 检索命中子块后，取对应父块内容
+parent_chunk_id = chunk.metadata.get('parent_chunk_id')
+if parent_chunk_id and parent_chunk_id in parent_map:
+    text = parent_map[parent_chunk_id]   # 用父块内容替换子块内容
+else:
+    text = chunk.text                    # 未开启父子分块，直接用子块
+```
+
+父块通过 `get_by_ids()` 批量从向量库取出（父块用零向量存储，不参与相似度计算，只存内容）：
+
+```python
+parent_ids = [c.metadata.get('parent_chunk_id') for c in chunks if ...]
+parent_records = self.vector_store.get_by_ids(parent_ids)
+parent_map = {r.id: r.text for r in parent_records}
+```
+
+**引用溯源仍来自子块**：来源文件、页码、相关度分数都是子块的 metadata，因为相关度是子块的向量相似度打出来的，父块只提供内容。
+
+### 1.3 Token 预算控制：整体跳过低相关 chunk
 
 召回的 chunk 按相关性分数降序排列，在 token 预算内尽量多放，超出预算时整体跳过（不截断单个 chunk，保证语义完整）：
 
@@ -54,7 +77,7 @@ for i, chunk in enumerate(chunks):
 
 **为什么不截断**：截断可能发生在句子中间，LLM 看到残缺信息反而更容易产生幻觉（用自己的知识"补全"）。整体跳过低相关 chunk，保证每个进入 Prompt 的 chunk 都是完整的。
 
-### 1.3 完整 Prompt 结构
+### 1.4 完整 Prompt 结构
 
 最终送给 LLM 的 Prompt 由三部分组成：
 

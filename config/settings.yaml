@@ -73,6 +73,12 @@ document:
   splitting:
     separators: ["\n\n", "\n", "。", "！", "？", "；", ". ", " ", ""]
     keep_separator: true
+    # 父子分块配置（hierarchical chunking）
+    # 开启后：小块（child）入向量库用于精确检索，大块（parent）存储备用喂给 LLM
+    hierarchical:
+      enabled: true            # 默认关闭，开启后需重新索引
+      parent_chunk_size: 1024    # 父块大小（字符数）
+      parent_chunk_overlap: 100  # 父块重叠
     is_separator_regex: true
 
 # 6. 检索模块配置
@@ -85,7 +91,7 @@ retrieval:
     enabled: true
     vector_weight: 0.7
     keyword_weight: 0.3
-    keyword_method: "bm25"   # "bm25" 或 "tfidf"，BM25 加入 TF 饱和 + 文档长度归一化
+    keyword_method: "bm25"    # "bm25" 或 "tfidf"，BM25 加入 TF 饱和 + 文档长度归一化
 
   reranker:
     enabled: false              # CPU 上关闭，避免额外下载模型和性能开销

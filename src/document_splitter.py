@@ -104,6 +104,111 @@ class RecursiveCharacterSplitter(BaseSplitter):
         # 策略二：合并碎片块
         return self._merge_small_chunks(text_chunks)
 
+    def split_hierarchical(
+        self,
+        document: Document,
+        parent_chunk_size: int = 1024,
+        parent_chunk_overlap: int = 100,
+    ) -> tuple:
+        """
+        父子分块：小块用于精确检索，大块用于喂给 LLM 补充上下文。
+
+        流程：
+        1. 用较大的 chunk_size 切出父块（parent chunks）
+        2. 对每个父块再用当前 chunk_size 切出子块（child chunks）
+        3. 子块 metadata 记录 parent_chunk_id，检索命中子块后可取出父块
+
+        Args:
+            document: 待切分文档
+            parent_chunk_size: 父块大小，默认 1024 字符
+            parent_chunk_overlap: 父块重叠，默认 100 字符
+
+        Returns:
+            (child_chunks, parent_chunks)
+            - child_chunks: 入向量库，用于检索
+            - parent_chunks: 存储备用，检索命中后取出喂给 LLM
+        """
+        page_to_section = document.metadata.get("_page_to_section", {})
+        base_metadata = {
+            k: v for k, v in document.metadata.items()
+            if isinstance(v, (str, int, float, bool))
+        }
+
+        # ---- 第一步：切父块 ----
+        parent_splitter = RecursiveCharacterSplitter(
+            chunk_size=parent_chunk_size,
+            chunk_overlap=parent_chunk_overlap,
+            min_chunk_size=self.min_chunk_size,
+            separators=self.separators,
+        )
+        parent_raw = parent_splitter._recursive_split(document.content, self.separators[:])
+
+        parent_chunks: List[TextChunk] = []
+        current_pos = 0
+        current_page = 1
+
+        for i, content in enumerate(parent_raw):
+            start_idx = document.content.find(content, current_pos)
+            if start_idx == -1:
+                start_idx = current_pos
+            end_idx = start_idx + len(content)
+
+            page_match = re.search(r'\[PAGE:(\d+)\]', content)
+            if page_match:
+                current_page = int(page_match.group(1))
+
+            clean_content = re.sub(r'\[PAGE:\d+\]\s*', '', content).strip()
+            section_path = page_to_section.get(current_page - 1, '')
+            parent_id = f"{document.doc_id}_parent_{i}"
+
+            parent_chunks.append(TextChunk(
+                content=clean_content,
+                metadata={
+                    **base_metadata,
+                    "chunk_index": i,
+                    "chunk_size": len(clean_content),
+                    "parent_doc_id": document.doc_id,
+                    "page": current_page,
+                    "section_path": section_path,
+                    "is_parent": True,
+                },
+                chunk_id=parent_id,
+                start_idx=start_idx,
+                end_idx=end_idx,
+            ))
+            current_pos = end_idx
+
+        # ---- 第二步：对每个父块切子块 ----
+        child_chunks: List[TextChunk] = []
+        child_idx = 0
+
+        for parent in parent_chunks:
+            child_raw = self._recursive_split(parent.content, self.separators[:])
+            for raw_content in child_raw:
+                clean_content = raw_content.strip()
+                if len(clean_content) < self.min_chunk_size:
+                    continue
+                child_chunks.append(TextChunk(
+                    content=clean_content,
+                    metadata={
+                        **parent.metadata,
+                        "chunk_index": child_idx,
+                        "chunk_size": len(clean_content),
+                        "parent_chunk_id": parent.chunk_id,  # 关键：记录父块 ID
+                        "is_parent": False,
+                    },
+                    chunk_id=f"{document.doc_id}_child_{child_idx}",
+                    start_idx=parent.start_idx,
+                    end_idx=parent.end_idx,
+                ))
+                child_idx += 1
+
+        logger.info(
+            f"Hierarchical split: {len(parent_chunks)} parent chunks, "
+            f"{len(child_chunks)} child chunks"
+        )
+        return child_chunks, parent_chunks
+
     def _merge_small_chunks(self, chunks: List[TextChunk]) -> List[TextChunk]:
         """把长度小于 min_chunk_size 的碎片块合并到前一个块。"""
         if not chunks:

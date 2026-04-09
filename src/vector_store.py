@@ -122,6 +122,21 @@ class ChromaVectorStore(BaseVectorStore):
             metadata=result["metadatas"][0],
         )
 
+    def get_by_ids(self, ids: List[str]) -> List[VectorRecord]:
+        """批量获取多个记录，用于父子 chunk 召回时取出父块内容。"""
+        if not ids:
+            return []
+        result = self.collection.get(ids=ids)
+        records = []
+        for i in range(len(result["ids"])):
+            records.append(VectorRecord(
+                id=result["ids"][i],
+                vector=[],
+                text=result["documents"][i],
+                metadata=result["metadatas"][i],
+            ))
+        return records
+
     def count(self) -> int:
         return self.collection.count()
 

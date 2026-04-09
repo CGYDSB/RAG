@@ -418,7 +418,46 @@ class RAGPipeline:
         logger.info(f"Loaded {len(documents)} documents")
 
         # -------- 2. 文档切分 --------
-        all_chunks = self.splitter.split_batch(documents)
+        doc_cfg = self.config.get('document', {})
+        hierarchical_cfg = doc_cfg.get('splitting', {}).get('hierarchical', {})
+        use_hierarchical = hierarchical_cfg.get('enabled', False)
+
+        if use_hierarchical:
+            # 父子分块：子块入向量库，父块单独存储
+            parent_chunk_size = hierarchical_cfg.get('parent_chunk_size', 1024)
+            parent_chunk_overlap = hierarchical_cfg.get('parent_chunk_overlap', 100)
+            all_child_chunks = []
+            all_parent_chunks = []
+            for doc in documents:
+                child_chunks, parent_chunks = self.splitter.split_hierarchical(
+                    doc,
+                    parent_chunk_size=parent_chunk_size,
+                    parent_chunk_overlap=parent_chunk_overlap,
+                )
+                all_child_chunks.extend(child_chunks)
+                all_parent_chunks.extend(parent_chunks)
+            all_chunks = all_child_chunks
+            logger.info(
+                f"Hierarchical split: {len(all_parent_chunks)} parent chunks, "
+                f"{len(all_child_chunks)} child chunks (indexing child chunks)"
+            )
+            # 父块也存入向量库（不参与检索，只用于取内容）
+            for i in range(0, len(all_parent_chunks), batch_size):
+                batch = all_parent_chunks[i:i+batch_size]
+                # 父块用零向量占位，不参与向量检索
+                records = [
+                    VectorRecord(
+                        id=c.chunk_id,
+                        vector=[0.0] * self.embedding_model.dimension,
+                        text=c.content,
+                        metadata=c.metadata
+                    )
+                    for c in batch
+                ]
+                self.vector_store.add(records)
+        else:
+            all_chunks = self.splitter.split_batch(documents)
+
         logger.info(f"Generated {len(all_chunks)} chunks")
 
         # -------- 3. 分批 embedding + 入库 --------
@@ -579,15 +618,36 @@ class RAGPipeline:
         优化：
         1. 不截断单个 chunk（整体丢弃低相关 chunk，保证语义完整性）
         2. 精确 token 计数（tiktoken，降级为字符估算）
-        3. 总长度不超过 context token 预算
+        3. 父子 chunk：检索命中子块时，取对应父块内容喂给 LLM（上下文更完整）
         """
         budget_tokens = self.token_budget['context']
         context_parts = []
         used_tokens = 0
 
+        # 收集需要取父块的 chunk ID
+        parent_ids = [
+            c.metadata.get('parent_chunk_id')
+            for c in chunks
+            if c.metadata and c.metadata.get('parent_chunk_id')
+        ]
+        # 批量取父块内容
+        parent_map = {}
+        if parent_ids:
+            try:
+                parent_records = self.vector_store.get_by_ids(parent_ids)
+                parent_map = {r.id: r.text for r in parent_records}
+            except Exception as e:
+                logger.debug(f"Failed to fetch parent chunks: {e}")
+
         for i, chunk in enumerate(chunks):
             citation = f"[[{i+1}]]"
-            text = chunk.text
+
+            # 父子 chunk：优先使用父块内容（上下文更完整）
+            parent_chunk_id = chunk.metadata.get('parent_chunk_id') if chunk.metadata else None
+            if parent_chunk_id and parent_chunk_id in parent_map:
+                text = parent_map[parent_chunk_id]
+            else:
+                text = chunk.text
 
             # chunk 格式化加入文档名，帮助 LLM 感知内容来源
             filename = chunk.metadata.get('filename', '') if chunk.metadata else ''

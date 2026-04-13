@@ -9,7 +9,7 @@
 ```
 embedding/
 ├── __init__.py     # 公共接口导出
-├── model.py        # Embedding 模型（多后端支持）
+├── model.py        # Embedding 模型
 ├── finetuner.py    # Embedding 模型微调
 └── data_gen.py     # 微调训练数据生成
 ```
@@ -24,7 +24,7 @@ embedding/
 |----|------|
 | `BaseEmbeddingModel` | 抽象基类，定义 `embed_documents` / `embed_query` / `dimension` 接口 |
 | `OpenAIEmbedding` | OpenAI API（text-embedding-ada-002 等） |
-| `SentenceTransformerEmbedding` | 本地模型（推荐，支持 BGE 系列），bge 模型检索时自动加前缀 |
+| `SentenceTransformerEmbedding` | 本地模型（推荐，支持 BGE 系列） |
 | `HuggingFaceEmbedding` | HuggingFace 自定义模型 |
 | `CachedEmbeddingModel` | LRU 缓存装饰器，避免重复向量化 |
 | `EmbeddingModelFactory` | 工厂类，根据 `settings.yaml` 的 `embedding.provider` 创建对应实例 |

@@ -9,7 +9,7 @@
 ```
 retrieval/
 ├── __init__.py       # 公共接口导出
-├── vector_store.py   # 向量数据库（多后端支持）
+├── vector_store.py   # 向量数据库
 └── retriever.py      # 混合检索器
 ```
 

@@ -94,7 +94,7 @@ retrieval:
     keyword_method: "bm25"    # "bm25" 或 "tfidf"，BM25 加入 TF 饱和 + 文档长度归一化
 
   reranker:
-    enabled: false              # CPU 上关闭，避免额外下载模型和性能开销
+    enabled: false             # CPU 上关闭，避免额外下载模型和性能开销
 
   query_expansion:
     enabled: false              # 关闭，减少 LLM API 调用次数和费用

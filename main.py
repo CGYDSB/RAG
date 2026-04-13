@@ -436,7 +436,7 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
     # ===== index 子命令：文档入库 =====
-    # 用法：python main.py index --source data/raw/
+    # 用法：python main.py index --source data/raw/ --clear
     index_parser = subparsers.add_parser('index', help='索引文档到向量数据库')
     index_parser.add_argument('--source', '-s', required=True,
                               help='文档路径（文件或目录）')
